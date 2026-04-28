@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Session Editor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .json-block {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            overflow-x: auto;
+            max-width: 100%;
+            white-space: pre-wrap;
+            word-break: break-all;
+            word-wrap: break-word;
+            font-family: monospace;
+        }
+
+        .timeline-container {
+            height: calc(100vh - 4rem);
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        .message-wrapper {
+            max-width: 80%;
+        }
+
+        .message-full {
+            max-width: 100%;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-100 h-screen flex overflow-hidden font-sans text-gray-800">
+
+    <!-- Sidebar -->
+    <aside class="w-64 bg-white shadow-md h-full flex flex-col border-r">
+        <div class="p-4 bg-blue-600 text-white text-lg font-bold">
+            Claude Editor
+        </div>
+        <div class="p-2 border-b">
+            <h3 class="text-sm font-bold text-gray-500 uppercase">Projects</h3>
+            <select id="projectSelect" class="w-full mt-1 p-2 border rounded text-sm">
+                <option value="">Select Project...</option>
+            </select>
+        </div>
+        <div class="flex-1 overflow-y-auto p-2">
+            <h3 class="text-sm font-bold text-gray-500 uppercase mb-2">Sessions</h3>
+            <ul id="sessionList" class="space-y-1">
+                <!-- Sessions listed here -->
+            </ul>
+        </div>
+        <div class="flex-1 overflow-y-auto p-2 border-t">
+            <h3 class="text-sm font-bold text-gray-500 uppercase mb-2">Memory</h3>
+            <ul id="memoryList" class="space-y-1">
+                <!-- Memory listed here -->
+            </ul>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="flex-1 flex flex-col h-full bg-gray-50">
+        <!-- Header -->
+        <header class="bg-white p-4 shadow-sm border-b flex justify-between items-center">
+            <h1 id="headerTitle" class="text-xl font-semibold">Select a session</h1>
+            <div>
+                <button id="btnSave" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 hidden"
+                    onclick="saveSession()">Save & Truncate</button>
+            </div>
+        </header>
+
+        <!-- Timeline -->
+        <div id="timeline" class="timeline-container p-6 space-y-6">
+            <!-- Messages rendered here -->
+            <div class="text-gray-400 text-center mt-10">Select a project and session to view its timeline.</div>
+        </div>
+    </main>
+
+    <script>
+        let currentProject = '';
+        let currentSessionId = '';
+        let currentEntries = [];
+        let activeChain = [];
+
+        const uiElements = {
+            projectSelect: document.getElementById('projectSelect'),
+            sessionList: document.getElementById('sessionList'),
+            memoryList: document.getElementById('memoryList'),
+            timeline: document.getElementById('timeline'),
+            headerTitle: document.getElementById('headerTitle'),
+            btnSave: document.getElementById('btnSave')
+        };
+
+        // Reconstruct chain logic by walking backward from the last user/assistant node or finding the longest branch
+        function reconstructChain(entries) {
+            const entryMap = new Map();
+            entries.forEach(e => {
+                if (e.uuid) entryMap.set(e.uuid, e);
+            });
+
+            // Find leaf nodes (nodes that are nobody's parent)
+            const parentUuids = new Set(entries.map(e => e.parentUuid).filter(Boolean));
+
+            // To simplify, just take the absolute last message in the array as the presumed leaf
+            let leaf = null;
+            for (let i = entries.length - 1; i >= 0; i--) {
+                const e = entries[i];
+                if (e.type === 'user' || e.type === 'assistant' || e.type === 'system') {
+                    leaf = e;
+                    break;
+                }
+            }
+
+            if (!leaf) return entries; // Fallback, just return all 
+
+            const chain = [];
+            let curr = leaf;
+            while (curr) {
+                chain.push(curr);
+                // When Claude Code compacts a conversation to save token context limit, 
+                // it nullifies parentUuid and stores the true parent in logicalParentUuid.
+                // We must traverse both to see the full UI history.
+                const nextId = curr.parentUuid || curr.logicalParentUuid;
+
+                if (nextId) {
+                    curr = entryMap.get(nextId);
+                } else {
+                    curr = null;
+                }
+            }
+
+            chain.reverse();
+
+            // Add non-chain metadata entries (like custom-title, etc) that appear at the end
+            const metadata = entries.filter(e => e.type !== 'user' && e.type !== 'assistant' && e.type !== 'system' && e.type !== 'attachment');
+
+            return [...chain, ...metadata];
+        }
+
+        async function loadProjects() {
+            const res = await fetch('/api/projects');
+            const projects = await res.json();
+            uiElements.projectSelect.innerHTML = '<option value="">Select Project...</option>';
+            projects.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p;
+                opt.textContent = p;
+                uiElements.projectSelect.appendChild(opt);
+            });
+        }
+
+        async function loadSessions(project) {
+            uiElements.sessionList.innerHTML = '<li class="text-sm text-gray-500">Loading...</li>';
+            const res = await fetch(`/api/projects/${encodeURIComponent(project)}/sessions`);
+            const sessions = await res.json();
+            uiElements.sessionList.innerHTML = '';
+
+            if (sessions.length === 0) {
+                uiElements.sessionList.innerHTML = '<li class="text-sm text-gray-500">No sessions found.</li>';
+                return;
+            }
+
+            sessions.forEach(s => {
+                const li = document.createElement('li');
+                li.className = "cursor-pointer p-2 rounded hover:bg-gray-200 text-sm truncate";
+                li.textContent = `${s.id} (${(s.size / 1024).toFixed(1)} KB)`;
+                li.onclick = () => loadSessionData(project, s.id);
+                uiElements.sessionList.appendChild(li);
+            });
+        }
+
+        async function loadMemoryFiles(project) {
+            uiElements.memoryList.innerHTML = '<li class="text-sm text-gray-500">Loading...</li>';
+            const res = await fetch(`/api/projects/${encodeURIComponent(project)}/memory`);
+            const memoryFiles = await res.json();
+            uiElements.memoryList.innerHTML = '';
+
+            if (memoryFiles.length === 0) {
+                uiElements.memoryList.innerHTML = '<li class="text-sm text-gray-500">No memory files.</li>';
+                return;
+            }
+
+            memoryFiles.forEach(m => {
+                const li = document.createElement('li');
+                li.className = "cursor-pointer p-2 rounded hover:bg-gray-200 text-sm truncate";
+                li.textContent = m;
+                li.onclick = () => loadMemoryFileData(project, m);
+                uiElements.memoryList.appendChild(li);
+            });
+        }
+
+        async function loadMemoryFileData(project, filename) {
+            uiElements.headerTitle.textContent = `Memory: ${filename}`;
+            uiElements.btnSave.classList.add('hidden');
+            uiElements.timeline.innerHTML = '<div class="text-center text-gray-500 mt-10">Loading memory...</div>';
+
+            try {
+                const res = await fetch(`/api/projects/${encodeURIComponent(project)}/memory/file?path=${encodeURIComponent(filename)}`);
+                if (!res.ok) throw new Error("Failed to load");
+                const text = await res.text();
+                uiElements.timeline.innerHTML = `<div class="bg-white p-6 rounded shadow border"><pre class="whitespace-pre-wrap font-sans text-sm">${escapeHtml(text)}</pre></div>`;
+            } catch (e) {
+                uiElements.timeline.innerHTML = '<div class="text-center text-red-500 mt-10">Error loading memory</div>';
+            }
+        }
+
+        async function loadSessionData(project, sessionId) {
+            currentProject = project;
+            currentSessionId = sessionId;
+            uiElements.headerTitle.textContent = `Session: ${sessionId}`;
+            uiElements.timeline.innerHTML = '<div class="text-center text-gray-500 mt-10">Parsing .jsonl...</div>';
+
+            const res = await fetch(`/api/projects/${encodeURIComponent(project)}/sessions/${sessionId}`);
+            const data = await res.json();
+            currentEntries = data.entries;
+            currentSubagents = data.subagents || [];
+
+            // Reconstruct timeline
+            activeChain = reconstructChain(currentEntries);
+            uiElements.btnSave.classList.remove('hidden');
+
+            renderTimeline();
+        }
+
+        async function toggleSubagent(agentId, containerPrefix) {
+            const containerId = containerPrefix ? `subagent-container-${containerPrefix}` : `subagentsTopContainer`;
+            const container = document.getElementById(containerId);
+            if (!container) return;
+
+            // Check if already rendered
+            let existing = document.getElementById(`subagent-render-${agentId}-${containerPrefix || 'top'}`);
+            if (existing) {
+                existing.classList.toggle('hidden');
+                return;
+            }
+
+            const div = document.createElement('div');
+            div.id = `subagent-render-${agentId}-${containerPrefix || 'top'}`;
+            div.className = "border-2 border-purple-300 bg-purple-50 p-4 rounded mt-4 w-full";
+            div.innerHTML = `<div class="text-sm text-purple-600 mb-2 font-bold flex justify-between">
+                <span>Subagent Timeline: ${agentId}</span>
+                <span class="cursor-pointer font-normal underline hover:text-purple-800" onclick="document.getElementById('${div.id}').classList.add('hidden')">Close</span>
+            </div>
+            <div id="subagent-timeline-${agentId}-${containerPrefix || 'top'}" class="space-y-4">Loading...</div>`;
+            container.appendChild(div);
+
+            try {
+                const res = await fetch(`/api/projects/${encodeURIComponent(currentProject)}/sessions/${currentSessionId}/subagents/${agentId}`);
+                if (!res.ok) throw new Error("Fetch failed");
+                const data = await res.json();
+
+                const timelineContainer = document.getElementById(`subagent-timeline-${agentId}-${containerPrefix || 'top'}`);
+                timelineContainer.innerHTML = '';
+
+                // Construct basic timeline for subagent
+                const subChain = reconstructChain(data.entries);
+                const subViewable = subChain.filter(e => e.type === 'user' || e.type === 'assistant' || e.type === 'system');
+
+                if (subViewable.length === 0) timelineContainer.innerHTML = '<div class="text-gray-500">No logs found.</div>';
+
+                subViewable.forEach(e => {
+                    const w = document.createElement('div');
+                    w.className = "p-3 rounded bg-white shadow-sm border text-xs";
+                    if (e.type === 'user') w.classList.add('ml-auto', 'w-4/5', 'border-blue-200', 'bg-blue-50');
+                    if (e.type === 'assistant') w.classList.add('mr-auto', 'w-4/5', 'border-green-200');
+                    if (e.type === 'system') w.classList.add('mx-auto', 'w-full', 'border-red-200', 'bg-red-50');
+
+                    let contentHtml = "";
+                    if (e.content) contentHtml += `<p class="whitespace-pre-wrap break-words">${escapeHtml(e.content)}</p>`;
+                    if (e.subtype) contentHtml += `<p class="whitespace-pre-wrap break-words italic text-gray-500">[System Event: ${escapeHtml(e.subtype)}]</p>`;
+                    if (e.message && e.message.content) {
+                        if (Array.isArray(e.message.content)) {
+                            e.message.content.forEach(b => {
+                                if (b.type === 'text') {
+                                    contentHtml += `<p class="whitespace-pre-wrap break-words mt-2">${escapeHtml(b.text)}</p>`;
+                                } else if (b.type === 'thinking') {
+                                    contentHtml += `<div class="mt-2 p-2 bg-gray-100 border border-gray-300 rounded text-xs text-gray-700 italic"><div class="font-bold text-gray-500 uppercase mb-1">🤔 Thinking Process</div><p class="whitespace-pre-wrap break-words">${escapeHtml(b.thinking)}</p></div>`;
+                                } else if (b.type === 'tool_use') {
+                                    contentHtml += `<div class="mt-2 text-xs overflow-hidden"><span class="font-bold bg-yellow-100 text-yellow-800 px-2 py-1 rounded inline-block mb-1">🔧 Tool: ${b.name}</span><pre class="json-block mt-1 break-words whitespace-pre-wrap">${escapeHtml(JSON.stringify(b.input, null, 2))}</pre></div>`;
+                                } else if (b.type === 'tool_result') {
+                                    let resultText = '';
+                                    if(typeof b.content === 'string') resultText = b.content;
+                                    else if (Array.isArray(b.content)) resultText = b.content.map(bb => bb.text || bb.type).join('\\n');
+                                    contentHtml += `<div class="mt-2 text-xs overflow-hidden"><span class="font-bold bg-gray-200 text-gray-800 px-2 py-1 rounded inline-block mb-1">✅ Tool Result</span><pre class="json-block mt-1 max-h-48 overflow-y-auto break-words whitespace-pre-wrap">${escapeHtml(resultText)}</pre></div>`;
+                                }
+                            });
+                        } else if (typeof e.message.content === 'string') {
+                            contentHtml += `<p class="whitespace-pre-wrap break-words">${escapeHtml(e.message.content)}</p>`;
+                        }
+                    }
+
+                    w.innerHTML = `<div class="uppercase text-[10px] text-gray-400 font-bold mb-1">${e.type}</div>${contentHtml}`;
+                    timelineContainer.appendChild(w);
+                });
+            } catch (e) {
+                document.getElementById(`subagent-timeline-${agentId}-${containerPrefix || 'top'}`).innerHTML = `<div class="text-red-500">Failed to load subagent ${agentId}</div>`;
+            }
+        }
+
+
+        function renderTimeline() {
+            uiElements.timeline.innerHTML = '';
+
+            if (typeof currentSubagents !== 'undefined' && currentSubagents.length > 0) {
+                const subsBanner = document.createElement('div');
+                subsBanner.className = "bg-purple-50 border border-purple-200 p-4 rounded-lg mb-4";
+                subsBanner.innerHTML = `<h4 class="font-bold text-purple-800 mb-2">Subagents (${currentSubagents.length})</h4>
+                    <div class="flex flex-wrap gap-2">
+                        ${currentSubagents.map(s => `<button onclick="toggleSubagent('${s.id}')" class="px-3 py-1 bg-purple-200 text-purple-800 rounded text-xs border border-purple-300 hover:bg-purple-300">${s.id}</button>`).join('')}
+                    </div>
+                    <div id="subagentsTopContainer" class="mt-4 flex flex-col items-center"></div>
+                `;
+                uiElements.timeline.appendChild(subsBanner);
+            }
+
+            // Filter down to UI viewable
+            const viewable = activeChain.filter(e => e.type === 'user' || e.type === 'assistant' || e.type === 'system');
+
+            viewable.forEach((entry, idx) => {
+                const wrapper = document.createElement('div');
+                wrapper.className = "p-4 rounded-lg shadow-sm bg-white border relative";
+
+                // Alignment
+                if (entry.type === 'user') wrapper.classList.add('ml-auto', 'message-wrapper', 'border-blue-200', 'bg-blue-50');
+                if (entry.type === 'assistant') wrapper.classList.add('mr-auto', 'message-wrapper', 'border-green-200');
+                if (entry.type === 'system') wrapper.classList.add('mx-auto', 'message-full', 'border-red-200', 'bg-red-50');
+
+                let contentHtml = '';
+
+                // Content parser
+                if (entry.type === 'system') {
+                    if (entry.content) {
+                        contentHtml += `<p class="whitespace-pre-wrap break-words mt-2 p-2 border border-transparent hover:border-gray-300 rounded cursor-text" contenteditable="true" onblur="updateEntrySystemContent('${entry.uuid}', this.innerText)">${escapeHtml(entry.content)}</p>`;
+                    } else if (entry.subtype) {
+                        contentHtml += `<p class="whitespace-pre-wrap break-words italic text-gray-500">[System Event: ${escapeHtml(entry.subtype)}]</p>`;
+                    }
+                } else if (entry.message && entry.message.content) {
+                    if (Array.isArray(entry.message.content)) {
+                        entry.message.content.forEach((c, idx) => {
+                            if (c.type === 'text') {
+                                contentHtml += `<p class="whitespace-pre-wrap break-words mt-2 p-2 border border-transparent hover:border-gray-300 rounded cursor-text" contenteditable="true" onblur="updateEntryBlockContent('${entry.uuid}', ${idx}, this.innerText)">${escapeHtml(c.text)}</p>`;
+                            } else if (c.type === 'thinking') {
+                                contentHtml += `<div class="mt-2 p-3 bg-gray-100 border border-gray-300 rounded-lg text-sm text-gray-700 italic">
+                                    <div class="font-bold text-xs text-gray-500 uppercase mb-1 flex items-center">🤔 Thinking Process</div>
+                                    <p class="whitespace-pre-wrap break-words cursor-text hover:bg-white rounded border border-transparent p-1" contenteditable="true" onblur="updateEntryBlockContent('${entry.uuid}', ${idx}, this.innerText)">${escapeHtml(c.thinking)}</p>
+                                </div>`;
+                            } else if (c.type === 'tool_use') {
+                                let subagentBtn = '';
+                                if (c.name.toLowerCase() === 'agent' || c.name.toLowerCase() === 'subagent') {
+                                    subagentBtn = currentSubagents.length > 0 ?
+                                        `<div class="mt-3 p-2 bg-purple-100 rounded border border-purple-200 text-xs">
+                                          <strong class="text-purple-800 block mb-2">Subagents for this tool invocation:</strong> 
+                                          <div class="flex gap-2">
+                                            ${currentSubagents.map(s => `<button onclick="toggleSubagent('${s.id}', '${entry.uuid}')" class="px-2 py-1 bg-purple-500 text-white rounded hover:bg-purple-600 border border-purple-600 shadow-sm">View Subagent: ${s.id}</button>`).join('')}
+                                          </div>
+                                        </div>` : '';
+                                }
+                                contentHtml += `
+                                <div class="mt-2 text-xs overflow-hidden">
+                                    <span class="font-bold bg-yellow-100 text-yellow-800 px-2 py-1 rounded inline-block mb-1">🔧 Tool: ${c.name}</span>
+                                    <pre class="json-block mt-1 break-words whitespace-pre-wrap">${escapeHtml(JSON.stringify(c.input, null, 2))}</pre>
+                                    ${subagentBtn}
+                                    <div id="subagent-container-${entry.uuid}" class="w-full flex-col items-center"></div>
+                                </div>`;
+                            } else if (c.type === 'tool_result') {
+                                let resultText = '';
+                                if (typeof c.content === 'string') {
+                                    resultText = c.content;
+                                } else if (Array.isArray(c.content)) {
+                                    resultText = c.content.map(b => b.text || b.type).join('\\n');
+                                }
+
+                                contentHtml += `
+                                <div class="mt-2 text-xs overflow-hidden">
+                                    <span class="font-bold bg-gray-200 text-gray-800 px-2 py-1 rounded inline-block mb-1">✅ Tool Result</span>
+                                    <pre class="json-block mt-1 max-h-96 overflow-y-auto break-words whitespace-pre-wrap cursor-text border border-transparent hover:border-gray-500" contenteditable="true" onblur="updateEntryBlockContent('${entry.uuid}', ${idx}, this.innerText)">${escapeHtml(resultText)}</pre>
+                                    <button class="mt-2 px-3 py-1 bg-red-50 text-red-500 rounded hover:bg-red-100 border border-red-200" onclick="deleteFromHere('${entry.uuid}')">Delete from here to end</button>
+                                </div>`;
+                            }
+                        });
+                    } else if (typeof entry.message.content === 'string') {
+                        contentHtml += `<p class="whitespace-pre-wrap break-words p-2 border border-transparent hover:border-gray-300 rounded cursor-text" contenteditable="true" onblur="updateEntryMessageString('${entry.uuid}', this.innerText)">${escapeHtml(entry.message.content)}</p>`;
+                    }
+                }
+
+                wrapper.innerHTML = `
+                    <div class="text-xs text-gray-400 mb-2 uppercase font-bold tracking-wider">${entry.type}</div>
+                    ${contentHtml}
+                    <div class="absolute top-2 right-2 text-[10px] text-gray-300">${entry.uuid || ''}</div>
+                `;
+
+                uiElements.timeline.appendChild(wrapper);
+            });
+        }
+
+        // State mutators for editing elements
+        function updateEntrySystemContent(uuid, text) {
+            const entry = activeChain.find(e => e.uuid === uuid);
+            if (entry) entry.content = text;
+        }
+
+        function updateEntryBlockContent(uuid, idx, text) {
+            const entry = activeChain.find(e => e.uuid === uuid);
+            if (entry && entry.message && Array.isArray(entry.message.content)) {
+                const block = entry.message.content[idx];
+                if (block.type === 'text') block.text = text;
+                else if (block.type === 'tool_result') block.content = text;
+                else if (block.type === 'thinking') block.thinking = text;
+            }
+        }
+
+        function updateEntryMessageString(uuid, text) {
+            const entry = activeChain.find(e => e.uuid === uuid);
+            if (entry && entry.message && typeof entry.message.content === 'string') {
+                entry.message.content = text;
+            }
+        }
+
+        // Basic destructive edit: slice array
+        function deleteFromHere(uuid) {
+            if (!confirm("Truncate all messages from this point forward?")) return;
+
+            const index = currentEntries.findIndex(e => e.uuid === uuid);
+            if (index > -1) {
+                // Delete everything from index onwards for timeline messages, 
+                // but preserve trailing pure metadata
+                const toKeep = currentEntries.slice(0, index);
+                const metadata = currentEntries.filter(e => !['user', 'assistant', 'system', 'attachment'].includes(e.type));
+
+                // Re-merge with unique elements
+                currentEntries = [...toKeep, ...metadata];
+                activeChain = reconstructChain(currentEntries);
+                renderTimeline();
+            }
+        }
+
+        async function saveSession() {
+            if (!confirm("Overwrite the .jsonl file with this active chain? This will erase forks forever.")) return;
+            uiElements.btnSave.textContent = "Saving...";
+            // We just send the activeChain back to overwrite
+            const res = await fetch(`/api/projects/${encodeURIComponent(currentProject)}/sessions/${currentSessionId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ entries: activeChain }) // Replace entire file with filtered active chain
+            });
+            const data = await res.json();
+            if (data.success) {
+                alert("Saved!");
+            } else {
+                alert("Error: " + data.error);
+            }
+            uiElements.btnSave.textContent = "Save & Truncate";
+        }
+
+        function escapeHtml(unsafe) {
+            return (unsafe || '').toString()
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        // Init
+        uiElements.projectSelect.addEventListener('change', (e) => {
+            if (e.target.value) {
+                loadSessions(e.target.value);
+                loadMemoryFiles(e.target.value);
+            }
+        });
+
+        loadProjects();
+
+    </script>
+</body>
+
+</html>
