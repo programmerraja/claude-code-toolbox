@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cursor Session Viewer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .json-block {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            overflow-x: auto;
+            max-width: 100%;
+            white-space: pre-wrap;
+            word-break: break-all;
+            font-family: monospace;
+            font-size: 0.75rem;
+        }
+
+        .timeline-container {
+            height: calc(100vh - 4rem);
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        .message-wrapper {
+            max-width: 85%;
+        }
+
+        .message-full {
+            max-width: 100%;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-100 h-screen flex overflow-hidden font-sans text-gray-800">
+
+    <aside class="w-72 bg-white shadow-md h-full flex flex-col border-r">
+        <div class="p-4 bg-violet-600 text-white">
+            <div class="text-lg font-bold">Cursor Viewer</div>
+            <div class="text-xs opacity-80 mt-1">Phase 1 — read only</div>
+        </div>
+
+        <div class="p-2 border-b">
+            <h3 class="text-sm font-bold text-gray-500 uppercase">Workspaces</h3>
+            <select id="projectSelect" class="w-full mt-1 p-2 border rounded text-sm">
+                <option value="">Select workspace...</option>
+            </select>
+            <p id="workspacePath" class="text-[10px] text-gray-400 mt-1 break-all"></p>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-2">
+            <div class="flex justify-between items-center mb-2">
+                <h3 class="text-sm font-bold text-gray-500 uppercase">Sessions</h3>
+                <button onclick="refreshProjects()" class="text-xs text-violet-600 hover:underline">Refresh</button>
+            </div>
+            <ul id="sessionList" class="space-y-1">
+                <li class="text-sm text-gray-500">Select a workspace</li>
+            </ul>
+        </div>
+
+        <div id="healthPanel" class="p-2 border-t text-[10px] text-gray-400"></div>
+    </aside>
+
+    <main class="flex-1 flex flex-col h-full bg-gray-50">
+        <header class="bg-white p-4 shadow-sm border-b flex justify-between items-center">
+            <div>
+                <h1 id="headerTitle" class="text-xl font-semibold">Select a session</h1>
+                <p id="headerMeta" class="text-xs text-gray-400 mt-1"></p>
+            </div>
+            <span id="sourceBadge" class="hidden text-xs px-2 py-1 rounded bg-violet-100 text-violet-700"></span>
+        </header>
+
+        <div id="timeline" class="timeline-container p-6 space-y-6">
+            <div class="text-gray-400 text-center mt-10">Select a workspace and session to view its timeline.</div>
+        </div>
+    </main>
+
+    <script>
+        let currentProject = null;
+        let currentSessionId = '';
+        let currentSource = 'transcripts';
+        let currentEntries = [];
+        let currentSubagents = [];
+
+        const ui = {
+            projectSelect: document.getElementById('projectSelect'),
+            workspacePath: document.getElementById('workspacePath'),
+            sessionList: document.getElementById('sessionList'),
+            timeline: document.getElementById('timeline'),
+            headerTitle: document.getElementById('headerTitle'),
+            headerMeta: document.getElementById('headerMeta'),
+            sourceBadge: document.getElementById('sourceBadge'),
+            healthPanel: document.getElementById('healthPanel'),
+        };
+
+        const TOOL_COLORS = {
+            Task: 'bg-purple-100 text-purple-800',
+            Bash: 'bg-orange-100 text-orange-800',
+            Read: 'bg-blue-100 text-blue-800',
+            Edit: 'bg-yellow-100 text-yellow-800',
+            Write: 'bg-yellow-100 text-yellow-800',
+            Grep: 'bg-green-100 text-green-800',
+            Glob: 'bg-green-100 text-green-800',
+            Shell: 'bg-orange-100 text-orange-800',
+            WebSearch: 'bg-cyan-100 text-cyan-800',
+            WebFetch: 'bg-cyan-100 text-cyan-800',
+        };
+
+        function isSubagentTool(name) {
+            const n = (name || '').toLowerCase();
+            return n === 'task' || n === 'agent' || n === 'subagent' || n === 'task_v2';
+        }
+
+        async function loadHealth() {
+            try {
+                const res = await fetch('/api/health');
+                const h = await res.json();
+                ui.healthPanel.innerHTML = [
+                    h.sqlite3 ? '✓ sqlite3' : '✗ sqlite3',
+                    h.projectsDir ? '✓ projects' : '✗ projects',
+                    h.globalDb ? '✓ global db' : '✗ global db',
+                ].join(' · ');
+            } catch {
+                ui.healthPanel.textContent = 'Health check failed';
+            }
+        }
+
+        async function refreshProjects() {
+            const res = await fetch('/api/projects?refresh=1');
+            const projects = await res.json();
+            renderProjectSelect(projects);
+        }
+
+        function renderProjectSelect(projects) {
+            ui.projectSelect.innerHTML = '<option value="">Select workspace...</option>';
+            projects.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.id;
+                const sources = (p.sources || []).join(' + ');
+                opt.textContent = `${p.label} (${sources})`;
+                opt.dataset.workspacePath = p.workspacePath || '';
+                opt.dataset.slug = p.slug || '';
+                ui.projectSelect.appendChild(opt);
+            });
+        }
+
+        async function loadProjects() {
+            const res = await fetch('/api/projects');
+            renderProjectSelect(await res.json());
+        }
+
+        async function loadSessions(projectId) {
+            ui.sessionList.innerHTML = '<li class="text-sm text-gray-500">Loading...</li>';
+            const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/sessions`);
+            const sessions = await res.json();
+            ui.sessionList.innerHTML = '';
+
+            if (sessions.length === 0) {
+                ui.sessionList.innerHTML = '<li class="text-sm text-gray-500">No sessions found.</li>';
+                return;
+            }
+
+            sessions.forEach(s => {
+                const li = document.createElement('li');
+                li.className = 'cursor-pointer p-2 rounded hover:bg-violet-50 border border-transparent hover:border-violet-200 text-sm';
+                const src = s.source === 'composer' ? 'composer' : 'transcripts';
+                const badge = src === 'composer'
+                    ? '<span class="text-[10px] bg-amber-100 text-amber-700 px-1 rounded">composer</span>'
+                    : '<span class="text-[10px] bg-violet-100 text-violet-700 px-1 rounded">agent</span>';
+                const title = s.title && s.title !== s.id ? s.title : s.id.slice(0, 8) + '…';
+                const subCount = s.subagentCount ? ` · ${s.subagentCount} sub` : '';
+                li.innerHTML = `<div class="flex items-center gap-1">${badge}<span class="truncate font-medium">${escapeHtml(title)}</span></div>
+                    <div class="text-[10px] text-gray-400">${s.messageCount || 0} msgs${subCount}</div>`;
+                li.onclick = () => loadSessionData(projectId, s.id, src);
+                ui.sessionList.appendChild(li);
+            });
+        }
+
+        async function loadSessionData(projectId, sessionId, source) {
+            currentProject = projectId;
+            currentSessionId = sessionId;
+            currentSource = source;
+
+            ui.headerTitle.textContent = 'Loading session...';
+            ui.timeline.innerHTML = '<div class="text-center text-gray-500 mt-10">Loading...</div>';
+
+            const res = await fetch(
+                `/api/projects/${encodeURIComponent(projectId)}/sessions/${sessionId}?source=${source}`
+            );
+            if (!res.ok) {
+                ui.timeline.innerHTML = '<div class="text-center text-red-500 mt-10">Failed to load session</div>';
+                return;
+            }
+
+            const data = await res.json();
+            currentEntries = data.entries || [];
+            currentSubagents = data.subagents || [];
+
+            ui.headerTitle.textContent = data.title || sessionId;
+            ui.headerMeta.textContent = [
+                data.workspace || '',
+                data.createdAt ? new Date(data.createdAt).toLocaleString() : '',
+                `${currentEntries.length} entries`,
+            ].filter(Boolean).join(' · ');
+
+            ui.sourceBadge.textContent = source;
+            ui.sourceBadge.classList.remove('hidden');
+
+            renderTimeline();
+        }
+
+        async function toggleSubagent(agentId, containerPrefix) {
+            const containerId = containerPrefix
+                ? `subagent-container-${containerPrefix}`
+                : 'subagentsTopContainer';
+            const container = document.getElementById(containerId);
+            if (!container) return;
+
+            const renderId = `subagent-render-${agentId}-${containerPrefix || 'top'}`;
+            let existing = document.getElementById(renderId);
+            if (existing) {
+                existing.classList.toggle('hidden');
+                return;
+            }
+
+            const sub = currentSubagents.find(s => s.id === agentId);
+            const div = document.createElement('div');
+            div.id = renderId;
+            div.className = 'border-2 border-purple-300 bg-purple-50 p-4 rounded mt-4 w-full';
+            div.innerHTML = `
+                <div class="text-sm text-purple-700 mb-2 font-bold flex justify-between">
+                    <span>Subagent: ${escapeHtml(agentId.slice(0, 8))}…</span>
+                    <span class="cursor-pointer font-normal underline" onclick="document.getElementById('${renderId}').classList.add('hidden')">Close</span>
+                </div>
+                ${sub?.description ? `<p class="text-xs text-purple-600 mb-2 italic">${escapeHtml(sub.description)}</p>` : ''}
+                <div id="subagent-timeline-${agentId}-${containerPrefix || 'top'}" class="space-y-3">Loading...</div>`;
+            container.appendChild(div);
+
+            try {
+                const res = await fetch(
+                    `/api/projects/${encodeURIComponent(currentProject)}/sessions/${currentSessionId}/subagents/${agentId}?source=${currentSource}`
+                );
+                const data = await res.json();
+                const timelineEl = document.getElementById(`subagent-timeline-${agentId}-${containerPrefix || 'top'}`);
+                timelineEl.innerHTML = '';
+                renderEntries(data.entries || [], timelineEl, { compact: true });
+            } catch {
+                document.getElementById(`subagent-timeline-${agentId}-${containerPrefix || 'top'}`).innerHTML =
+                    '<div class="text-red-500 text-xs">Failed to load subagent</div>';
+            }
+        }
+
+        function formatThinking(thinking) {
+            if (thinking == null) return '';
+            if (typeof thinking === 'string') return thinking;
+            if (typeof thinking === 'object') {
+                return thinking.text ?? thinking.content ?? thinking.thinking ?? JSON.stringify(thinking, null, 2);
+            }
+            return String(thinking);
+        }
+
+        function renderBlockContent(content, entryId) {
+            let html = '';
+            const blocks = Array.isArray(content) ? content : [{ type: 'text', text: String(content) }];
+
+            blocks.forEach((c, idx) => {
+                if (c.type === 'text') {
+                    html += `<p class="whitespace-pre-wrap break-words mt-2">${escapeHtml(c.text)}</p>`;
+                } else if (c.type === 'thinking') {
+                    html += `<div class="mt-2 p-3 bg-gray-100 border border-gray-300 rounded-lg text-sm text-gray-700 italic">
+                        <div class="font-bold text-xs text-gray-500 uppercase mb-1">Thinking</div>
+                        <p class="whitespace-pre-wrap break-words">${escapeHtml(formatThinking(c.thinking))}</p>
+                    </div>`;
+                } else if (c.type === 'tool_use') {
+                    const color = TOOL_COLORS[c.name] || 'bg-yellow-100 text-yellow-800';
+                    let subagentBtn = '';
+                    if (isSubagentTool(c.name) && currentSubagents.length > 0) {
+                        subagentBtn = `<div class="mt-2 p-2 bg-purple-50 rounded border border-purple-200">
+                            <span class="text-xs text-purple-700 font-semibold">Subagents:</span>
+                            <div class="flex flex-wrap gap-1 mt-1">
+                                ${currentSubagents.map(s =>
+                                    `<button onclick="toggleSubagent('${s.id}', '${entryId}-${idx}')"
+                                        class="px-2 py-0.5 bg-purple-500 text-white rounded text-[10px] hover:bg-purple-600">
+                                        ${escapeHtml(s.id.slice(0, 8))}…
+                                    </button>`
+                                ).join('')}
+                            </div>
+                        </div>`;
+                    }
+                    html += `<div class="mt-2 text-xs overflow-hidden">
+                        <span class="font-bold ${color} px-2 py-1 rounded inline-block mb-1">Tool: ${escapeHtml(c.name)}</span>
+                        <pre class="json-block mt-1">${escapeHtml(JSON.stringify(c.input, null, 2))}</pre>
+                        ${subagentBtn}
+                        <div id="subagent-container-${entryId}-${idx}" class="w-full"></div>
+                    </div>`;
+                } else if (c.type === 'tool_result') {
+                    let resultText = '';
+                    if (typeof c.content === 'string') resultText = c.content;
+                    else if (Array.isArray(c.content)) {
+                        resultText = c.content.map(b => b.text || JSON.stringify(b)).join('\n');
+                    } else resultText = JSON.stringify(c.content);
+                    html += `<div class="mt-2 text-xs overflow-hidden">
+                        <span class="font-bold bg-gray-200 text-gray-700 px-2 py-1 rounded inline-block mb-1">Tool Result</span>
+                        <pre class="json-block mt-1 max-h-96 overflow-y-auto">${escapeHtml(resultText)}</pre>
+                    </div>`;
+                } else {
+                    html += `<pre class="json-block mt-2 text-xs">${escapeHtml(JSON.stringify(c, null, 2))}</pre>`;
+                }
+            });
+            return html;
+        }
+
+        function renderEntries(entries, container, { compact = false } = {}) {
+            const viewable = entries.filter(e =>
+                e.type === 'user' || e.type === 'assistant' || e.type === 'system'
+            );
+
+            if (viewable.length === 0) {
+                container.innerHTML = '<div class="text-gray-500 text-sm">No messages found.</div>';
+                return;
+            }
+
+            viewable.forEach((entry, idx) => {
+                const wrapper = document.createElement('div');
+                const pad = compact ? 'p-2' : 'p-4';
+                wrapper.className = `${pad} rounded-lg shadow-sm bg-white border relative`;
+
+                const entryId = entry._entryId || entry._bubbleId || `e-${idx}`;
+
+                if (entry.type === 'user') {
+                    wrapper.classList.add('ml-auto', 'message-wrapper', 'border-blue-200', 'bg-blue-50');
+                } else if (entry.type === 'assistant') {
+                    wrapper.classList.add('mr-auto', 'message-wrapper', 'border-green-200');
+                } else {
+                    wrapper.classList.add('mx-auto', 'message-full', 'border-red-200', 'bg-red-50');
+                }
+
+                let contentHtml = '';
+                if (entry.type === 'system') {
+                    contentHtml = `<p class="whitespace-pre-wrap break-words">${escapeHtml(entry.content || entry.subtype || '')}</p>`;
+                } else if (entry.message?.content) {
+                    contentHtml = renderBlockContent(entry.message.content, entryId);
+                }
+
+                const ts = entry.timestamp
+                    ? `<span class="text-[10px] text-gray-300">${escapeHtml(entry.timestamp)}</span>`
+                    : '';
+
+                wrapper.innerHTML = `
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="text-xs text-gray-400 uppercase font-bold">${entry.type}</span>
+                        ${ts}
+                    </div>
+                    ${contentHtml}`;
+
+                container.appendChild(wrapper);
+            });
+        }
+
+        function renderTimeline() {
+            ui.timeline.innerHTML = '';
+
+            if (currentSubagents.length > 0) {
+                const banner = document.createElement('div');
+                banner.className = 'bg-purple-50 border border-purple-200 p-4 rounded-lg mb-4';
+                banner.innerHTML = `
+                    <h4 class="font-bold text-purple-800 mb-2">Subagents (${currentSubagents.length})</h4>
+                    <div class="flex flex-wrap gap-2">
+                        ${currentSubagents.map(s =>
+                            `<button onclick="toggleSubagent('${s.id}')"
+                                class="px-3 py-1 bg-purple-200 text-purple-800 rounded text-xs border border-purple-300 hover:bg-purple-300"
+                                title="${escapeHtml(s.description || '')}">
+                                ${escapeHtml(s.id.slice(0, 8))}…
+                            </button>`
+                        ).join('')}
+                    </div>
+                    <div id="subagentsTopContainer" class="mt-4"></div>`;
+                ui.timeline.appendChild(banner);
+            }
+
+            renderEntries(currentEntries, ui.timeline);
+        }
+
+        function escapeHtml(unsafe) {
+            return (unsafe || '').toString()
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        ui.projectSelect.addEventListener('change', (e) => {
+            const opt = e.target.selectedOptions[0];
+            if (!e.target.value) {
+                ui.workspacePath.textContent = '';
+                ui.sessionList.innerHTML = '<li class="text-sm text-gray-500">Select a workspace</li>';
+                return;
+            }
+            const ws = opt.dataset.workspacePath;
+            const slug = opt.dataset.slug;
+            ui.workspacePath.textContent = ws || `slug: ${slug}`;
+            loadSessions(e.target.value);
+        });
+
+        loadProjects();
+        loadHealth();
+    </script>
+</body>
+
+</html>
