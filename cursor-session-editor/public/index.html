@@ -45,6 +45,21 @@
         </div>
 
         <div class="p-2 border-b">
+            <h3 class="text-sm font-bold text-gray-500 uppercase">Search messages</h3>
+            <form id="searchForm" class="mt-1 flex gap-1">
+                <input id="searchInput" type="search" placeholder="Find text in sessions…"
+                    class="flex-1 min-w-0 p-2 border rounded text-sm"
+                    autocomplete="off" />
+                <button type="submit"
+                    class="px-2 py-1 bg-violet-600 text-white rounded text-sm hover:bg-violet-700 shrink-0">
+                    Go
+                </button>
+            </form>
+            <div id="searchStatus" class="text-[10px] text-gray-400 mt-1 hidden"></div>
+            <ul id="searchResults" class="mt-2 space-y-1 max-h-48 overflow-y-auto hidden"></ul>
+        </div>
+
+        <div class="p-2 border-b">
             <h3 class="text-sm font-bold text-gray-500 uppercase">Workspaces</h3>
             <select id="projectSelect" class="w-full mt-1 p-2 border rounded text-sm">
                 <option value="">Select workspace...</option>
@@ -95,6 +110,10 @@
             headerMeta: document.getElementById('headerMeta'),
             sourceBadge: document.getElementById('sourceBadge'),
             healthPanel: document.getElementById('healthPanel'),
+            searchForm: document.getElementById('searchForm'),
+            searchInput: document.getElementById('searchInput'),
+            searchStatus: document.getElementById('searchStatus'),
+            searchResults: document.getElementById('searchResults'),
         };
 
         const TOOL_COLORS = {
@@ -394,6 +413,72 @@
                 .replace(/'/g, '&#039;');
         }
 
+        async function runSearch(query) {
+            const q = (query || '').trim();
+            if (q.length < 2) {
+                ui.searchStatus.textContent = 'Type at least 2 characters';
+                ui.searchStatus.classList.remove('hidden');
+                ui.searchResults.classList.add('hidden');
+                return;
+            }
+
+            ui.searchStatus.textContent = 'Searching… (may take a few seconds)';
+            ui.searchStatus.classList.remove('hidden');
+            ui.searchResults.classList.add('hidden');
+            ui.searchResults.innerHTML = '';
+
+            try {
+                const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=40`);
+                const data = await res.json();
+                if (data.error) {
+                    ui.searchStatus.textContent = data.error;
+                    return;
+                }
+
+                const results = data.results || [];
+                ui.searchStatus.textContent = results.length
+                    ? `${results.length} session${results.length === 1 ? '' : 's'} matched`
+                    : 'No matches';
+
+                if (results.length === 0) return;
+
+                ui.searchResults.classList.remove('hidden');
+                results.forEach((r) => {
+                    const li = document.createElement('li');
+                    li.className = 'cursor-pointer p-2 rounded hover:bg-violet-50 border border-gray-100 text-xs';
+                    const badge = r.source === 'composer'
+                        ? '<span class="text-[10px] bg-amber-100 text-amber-700 px-1 rounded">composer</span>'
+                        : '<span class="text-[10px] bg-violet-100 text-violet-700 px-1 rounded">agent</span>';
+                    const title = r.title && r.title !== r.sessionId
+                        ? r.title
+                        : r.sessionId.slice(0, 8) + '…';
+                    li.innerHTML = `
+                        <div class="flex items-center gap-1 flex-wrap">
+                            ${badge}
+                            <span class="font-medium truncate">${escapeHtml(title)}</span>
+                        </div>
+                        <div class="text-[10px] text-gray-500 truncate">${escapeHtml(r.projectLabel || '')}</div>
+                        <div class="text-[10px] text-gray-400 mt-0.5 line-clamp-2">${escapeHtml(r.snippet || '')}</div>`;
+                    li.onclick = () => openSearchResult(r);
+                    ui.searchResults.appendChild(li);
+                });
+            } catch (err) {
+                ui.searchStatus.textContent = 'Search failed: ' + (err.message || 'error');
+            }
+        }
+
+        async function openSearchResult(r) {
+            // Select matching workspace in dropdown if present
+            const opt = [...ui.projectSelect.options].find((o) => o.value === r.projectId);
+            if (opt) {
+                ui.projectSelect.value = r.projectId;
+                ui.workspacePath.textContent =
+                    opt.dataset.workspacePath || `slug: ${opt.dataset.slug || ''}`;
+                await loadSessions(r.projectId);
+            }
+            await loadSessionData(r.projectId, r.sessionId, r.source);
+        }
+
         ui.projectSelect.addEventListener('change', (e) => {
             const opt = e.target.selectedOptions[0];
             if (!e.target.value) {
@@ -405,6 +490,11 @@
             const slug = opt.dataset.slug;
             ui.workspacePath.textContent = ws || `slug: ${slug}`;
             loadSessions(e.target.value);
+        });
+
+        ui.searchForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            runSearch(ui.searchInput.value);
         });
 
         loadProjects();

@@ -11,6 +11,7 @@ import {
   loadSession,
   loadSubagent,
 } from "./lib/discover.js";
+import { searchSessions } from "./lib/search.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -96,6 +97,15 @@ const server = http.createServer(async (req, res) => {
           sources: p.sources,
         })),
       );
+      return;
+    }
+
+    if (pathname === "/api/search" && req.method === "GET") {
+      const q = url.searchParams.get("q") || "";
+      const limit = url.searchParams.get("limit") || "30";
+      const projects = await getProjects();
+      const data = await searchSessions(q, projects, { limit });
+      sendJson(res, 200, data);
       return;
     }
 

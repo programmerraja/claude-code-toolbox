@@ -81,6 +81,125 @@ function toolResultContent(result) {
   return String(result ?? "").slice(0, 4000);
 }
 
+/** Pull printable UTF-8 runs out of Cursor's base64 protobuf toolCallBinary. */
+function stringsFromToolBinary(toolCallBinary) {
+  if (!toolCallBinary || typeof toolCallBinary !== "string") return [];
+  let buf;
+  try {
+    buf = Buffer.from(toolCallBinary, "base64");
+  } catch {
+    return [];
+  }
+  const out = [];
+  let cur = "";
+  for (let i = 0; i < buf.length; i += 1) {
+    const ch = buf[i];
+    if (ch >= 32 && ch < 127) {
+      cur += String.fromCharCode(ch);
+    } else if (ch === 10 || ch === 13 || ch === 9) {
+      cur += " ";
+    } else {
+      if (cur.length >= 8) out.push(cur.trim());
+      cur = "";
+    }
+  }
+  if (cur.length >= 8) out.push(cur.trim());
+  return out;
+}
+
+function isNoiseBinaryString(s) {
+  if (!s) return true;
+  // call- / fc_ ids, sometimes with a protobuf length-prefix letter glued on,
+  // and sometimes concatenated on one line
+  if (/call-[\w-]{8,}/i.test(s) && s.length < 120) return true;
+  if (/fc_[\w-]{8,}/i.test(s) && s.length < 120) return true;
+  if (/^(content|files?|matches?)[:"]?\s*$/i.test(s)) return true;
+  if (/^content":\s*/i.test(s) && s.length < 120) return true;
+  // Search pattern field (regex with |, little path-like content)
+  if (s.includes("|") && !s.includes("/") && s.length < 200) return true;
+  // Absolute path alone (already shown via additionalData.path)
+  if (/^[A-Za-z0-9]?\/Users\//.test(s) && !/\n/.test(s) && s.length < 300) {
+    return true;
+  }
+  return false;
+}
+
+/** Strip accidental protobuf length-prefix bytes glued onto match lines. */
+function cleanBinaryMatchLine(s) {
+  // Leading non-space printable char(s) before indentation/code — e.g. "%import", "&    foo"
+  return s.replace(/^[^\sA-Za-z{["'#/\\]+(?=[A-Za-z{["'#/\s])/, "").trim();
+}
+
+/**
+ * Cursor often stores Grep results only in additionalData + toolCallBinary
+ * (no plain `result` field). Reconstruct a readable tool_result for the UI.
+ */
+function resolveToolResult(tfd) {
+  if (!tfd) return null;
+
+  if (tfd.result != null && String(tfd.result).length > 0) {
+    return toolResultContent(tfd.result);
+  }
+
+  if (tfd.error != null && String(tfd.error).length > 0) {
+    return `Error: ${String(tfd.error).slice(0, 4000)}`;
+  }
+
+  const ad = tfd.additionalData;
+  const lines = [];
+
+  if (ad && typeof ad === "object") {
+    if (
+      "totalMatches" in ad ||
+      "topFiles" in ad ||
+      "pattern" in ad ||
+      "outputMode" in ad
+    ) {
+      if (ad.pattern != null) lines.push(`pattern: ${ad.pattern}`);
+      if (ad.path) lines.push(`path: ${ad.path}`);
+      if (ad.outputMode) lines.push(`outputMode: ${ad.outputMode}`);
+      lines.push(
+        `matches: ${ad.totalMatches ?? 0} in ${ad.totalFiles ?? 0} file(s)` +
+          (ad.isPruned ? " (pruned)" : ""),
+      );
+      if (Array.isArray(ad.topFiles) && ad.topFiles.length) {
+        lines.push("topFiles:");
+        for (const f of ad.topFiles.slice(0, 40)) {
+          const uri = f.uri ?? f.path ?? f.file ?? "?";
+          const n = f.matchCount ?? f.count ?? "";
+          lines.push(`  ${uri}${n !== "" ? ` (${n})` : ""}`);
+        }
+      }
+    } else if (Object.keys(ad).length > 0) {
+      // Generic tools that only left a summary in additionalData
+      lines.push(JSON.stringify(ad, null, 2));
+    }
+  }
+
+  const fromBin = stringsFromToolBinary(tfd.toolCallBinary)
+    .filter((s) => !isNoiseBinaryString(s))
+    .map(cleanBinaryMatchLine)
+    .filter((s) => s.length >= 4)
+    // Drop duplicates of path/pattern already shown
+    .filter((s) => {
+      if (ad?.path && s.includes(String(ad.path))) return false;
+      if (ad?.pattern && s.includes(String(ad.pattern))) return false;
+      return true;
+    });
+
+  if (fromBin.length) {
+    if (lines.length) lines.push("---");
+    for (const s of fromBin.slice(0, 100)) lines.push(s);
+  }
+
+  if (lines.length === 0) {
+    if (tfd.status) return `(${tfd.status}, no result payload)`;
+    return null;
+  }
+
+  return lines.join("\n").slice(0, 8000);
+}
+
 export function bubbleToEntries(bubble, { timestamp, meta, bubbleId }) {
   const entries = [];
   const role =
@@ -133,23 +252,25 @@ export function bubbleToEntries(bubble, { timestamp, meta, bubbleId }) {
   if (meta) assistantEntry._cursor_meta = meta;
   entries.push(assistantEntry);
 
-  if (tfd && tfd.result) {
-    const resultEntry = {
-      type: "user",
-      message: {
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            content: toolResultContent(tfd.result),
-            ...(toolCallId ? { tool_use_id: toolCallId } : {}),
-          },
-        ],
-      },
-      timestamp,
-      _bubbleId: bubbleId,
-    };
-    entries.push(resultEntry);
+  if (tfd) {
+    const resultText = resolveToolResult(tfd);
+    if (resultText) {
+      entries.push({
+        type: "user",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              content: resultText,
+              ...(toolCallId ? { tool_use_id: toolCallId } : {}),
+            },
+          ],
+        },
+        timestamp,
+        _bubbleId: bubbleId,
+      });
+    }
   }
 
   return entries;
