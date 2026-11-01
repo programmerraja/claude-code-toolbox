@@ -1,4 +1,3 @@
-import { execFileSync } from "child_process";
 import { queryValue } from "./sqlite.js";
 import { decodeWorkspaceFolderUri } from "./paths.js";
 import fs from "fs";
@@ -338,55 +337,31 @@ function findGitRoot(startPath) {
 export function listComposerSessions(dbPath, wsDir) {
   if (!fs.existsSync(dbPath)) return [];
 
-  const count = Number(
-    queryValue(
-      dbPath,
-      "SELECT COUNT(*) FROM cursorDiskKV WHERE key LIKE 'composerData:%'",
-    ) ?? 0,
-  );
-  if (!count) return [];
-
   const fallbackWorkspace = wsDir ? getWorkspacePathFromJson(wsDir) : "";
+
+  // Full composerData blobs can total hundreds of MB; project only the fields
+  // we need in SQLite so the pipe stays small. One JSON object per line.
   const raw = queryValue(
     dbPath,
-    "SELECT group_concat(key || char(31) || value, char(30)) FROM cursorDiskKV WHERE key LIKE 'composerData:%'",
+    `SELECT json_object(
+       'composerId', json_extract(value, '$.composerId'),
+       'name', json_extract(value, '$.name'),
+       'createdAt', json_extract(value, '$.createdAt'),
+       'messageCount', json_array_length(value, '$.fullConversationHeadersOnly'),
+       'workspaceIdentifier', json_extract(value, '$.workspaceIdentifier'),
+       'context', json_object('fileSelections', json_extract(value, '$.context.fileSelections')),
+       'allAttachedFileCodeChunksUris', json_extract(value, '$.allAttachedFileCodeChunksUris')
+     ) FROM cursorDiskKV
+     WHERE key LIKE 'composerData:%'
+       AND json_valid(value)
+       AND json_array_length(value, '$.fullConversationHeadersOnly') > 0`,
   );
-
-  // group_concat may truncate; fall back to line-by-line export
-  const rows = [];
-  try {
-    const out = execFileSync(
-      "sqlite3",
-      [
-        dbPath,
-        "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'",
-      ],
-      { encoding: "utf8", maxBuffer: 1024 * 1024 * 512 },
-    );
-    const lines = out.split("\n").filter(Boolean);
-    for (const line of lines) {
-      const sep = line.indexOf("|");
-      if (sep < 0) continue;
-      const key = line.slice(0, sep);
-      const value = line.slice(sep + 1);
-      rows.push({ key, value });
-    }
-  } catch {
-    if (raw) {
-      for (const chunk of raw.split("\u001e")) {
-        const sep = chunk.indexOf("\u001f");
-        if (sep < 0) continue;
-        rows.push({ key: chunk.slice(0, sep), value: chunk.slice(sep + 1) });
-      }
-    }
-  }
+  if (!raw) return [];
 
   const sessions = [];
-  for (const { value } of rows) {
-    const composerData = parseJsonSafe(value);
+  for (const line of raw.split("\n")) {
+    const composerData = parseJsonSafe(line);
     if (!composerData?.composerId) continue;
-    const headers = composerData.fullConversationHeadersOnly ?? [];
-    if (headers.length === 0) continue;
 
     const workspace = resolveSessionWorkspace(composerData, fallbackWorkspace);
     sessions.push({
@@ -396,7 +371,7 @@ export function listComposerSessions(dbPath, wsDir) {
       createdAt: composerData.createdAt
         ? new Date(Number(composerData.createdAt)).toISOString()
         : null,
-      messageCount: headers.length,
+      messageCount: composerData.messageCount,
       workspace,
       dbPath,
       dbKind: wsDir ? "workspace" : "global",
