@@ -1,0 +1,7 @@
+{
+  "MASTER_USER_ID": "d1a55f9a-1111-2222-3333-e98765432101",
+  "USERS": {
+    "Friend-1-Secret-Key": "Alice",
+    "Friend-2-Secret-Key": "Bob"
+  }
+}
