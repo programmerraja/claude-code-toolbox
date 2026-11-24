@@ -1,3 +1,9 @@
+---
+name: PR-code-review
+description: Review a pull request by framing the problem, confirming the spec, and mentally executing the code before writing comments.
+disable-model-invocation: true
+---
+
 # PR Review Skill
 
 ## Purpose

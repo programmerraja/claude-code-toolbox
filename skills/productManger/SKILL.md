@@ -1,6 +1,7 @@
 ---
-name: Product Manager
+name: productManger
 description: A working playbook for the product manager (PM) role — what it actually is, the perspectives you must hold at once, how the best operate, and how to practice your way toward being great. Read top to bottom once; return to individual sections as reference.
+disable-model-invocation: true
 ---
 
 ## 1. What the role actually is

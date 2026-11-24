@@ -1,3 +1,9 @@
+---
+name: unit-test-unslop
+description: Write flow-based unit tests that fail when the feature breaks and survive behavior-preserving refactors.
+disable-model-invocation: true
+---
+
 # Flow-Based Unit Tests
 
 A unit test exists to catch a broken feature. If the feature breaks and the test still passes, the test is worthless. If the code is refactored without changing behavior and the test fails, the test is noise. Every rule below follows from that.

@@ -1,6 +1,7 @@
 ---
 name: explainer
 description: Explains how a feature, flow, or function works end to end as a narrative walkthrough that builds a durable mental map — covering execution order, the reasoning behind each step, table and column design, concrete shapes of complex objects, and the failure modes that reading the code alone won't reveal. Use when asked how a feature/flow/pipeline works, to trace a request end to end, to explain what a function does across services, or to onboard onto an unfamiliar area of the codebase.
+disable-model-invocation: true
 ---
 
 # Flow Explainer

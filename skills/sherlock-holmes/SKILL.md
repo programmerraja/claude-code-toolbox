@@ -1,3 +1,9 @@
+---
+name: sherlock-holmes
+description: Root-cause debugging. Understand the issue, trace the flow, gather evidence, prove the cause, then fix with a regression test.
+disable-model-invocation: true
+---
+
 # Root-Cause Debugging
 
 Goal: fix the real cause, not the symptom, without breaking anything else. Never jump to a fix. Understand, prove, evaluate, then fix.

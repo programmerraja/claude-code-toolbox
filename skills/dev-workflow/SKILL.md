@@ -1,6 +1,7 @@
 ---
 name: dev-workflow
 description: Manual-grade engineering workflow accelerated by AI so the human keeps full codebase mental models, judgment, and learning. Classifies the task and routes to a dedicated playbook for building a new feature, adding/changing a feature inside an existing flow, fixing a bug, or improving performance.
+disable-model-invocation: true
 ---
 
 # Mental-Map Engineering Workflow

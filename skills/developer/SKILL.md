@@ -1,6 +1,7 @@
 ---
-name: senior-software-developer
+name: developer
 description: A working playbook for the judgment, lenses, and habits that make a senior software developer — not a competence checklist, but reference material for someone trying to be excellent at the role over years.
+disable-model-invocation: true
 ---
 
 ## 1. What the role actually is
