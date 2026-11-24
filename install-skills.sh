@@ -11,10 +11,10 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [--claude | --cursor | --both]
 
-Symlinks every skill folder in skills/ (containing SKILL.md) and every
-slash command in commands/ (*.md) into ~/.claude/{skills,commands} and/or
-~/.cursor/{skills,commands}. Safe to re-run whenever you add, rename, or
-remove skills or commands.
+Symlinks every skill folder under skills/ (any depth, containing SKILL.md)
+and every slash command in commands/ (*.md) into ~/.claude/{skills,commands}
+and/or ~/.cursor/{skills,commands}. Safe to re-run whenever you add, rename,
+or remove skills or commands.
 EOF
 }
 
@@ -44,9 +44,10 @@ link_skills() {
   mkdir -p "$target_dir"
   cleaned="$(clean_stale_links "$SKILLS_DIR" "$target_dir")"
 
-  for skill_dir in "$SKILLS_DIR"/*/; do
-    [ -f "${skill_dir}SKILL.md" ] || continue
-    local name dest
+  # Any depth: skills/engineering/foo/SKILL.md links as "foo".
+  while IFS= read -r skill_file; do
+    local skill_dir name dest
+    skill_dir="$(dirname "$skill_file")"
     name="$(basename "$skill_dir")"
     dest="$target_dir/$name"
 
@@ -58,7 +59,7 @@ link_skills() {
 
     ln -sfn "${skill_dir%/}" "$dest"
     linked=$((linked + 1))
-  done
+  done < <(find "$SKILLS_DIR" -name SKILL.md -type f | sort)
 
   echo "$label skills ($target_dir): linked $linked, skipped $skipped, cleaned $cleaned stale."
 }
